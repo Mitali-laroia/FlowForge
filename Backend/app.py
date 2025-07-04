@@ -1,375 +1,656 @@
 from typing import Dict, List, Optional, Literal, Any, Annotated
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import tweepy
-from hashnode_py.client import HashnodeClient
-import pymongo
-from pymongo import MongoClient
-import json
-import uuid
 import requests
-from contextlib import asynccontextmanager
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.mongodb import MongoDBSaver
-from langgraph.types import interrupt, Command
-from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
+from langchain_core.runnables import RunnableConfig
+from typing_extensions import TypedDict
+import logging
+import uuid
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# Initialize OpenAI client
 client = OpenAI()
 app = FastAPI(title="Blog Workflow API")
 
-# State Models
-class WorkflowState(BaseModel):
-    blog_topic: Optional[str] = None
-    theme_reference: Optional[str] = None
-    blog_content: Optional[str] = None
-    tweet_thread: Optional[List[str]] = None
-    publish_date: Optional[datetime] = None
-    status: str 
+# FIXED: Proper TypedDict state structure following checkpointer.py pattern
+class BlogWorkflowState(TypedDict):
+    blog_topic: Optional[str]
+    theme_reference: Optional[str]
+    theme_type: Optional[str]
+    blog_content: Optional[str]
+    tweet_thread: Optional[List[str]]
+    publish_date: Optional[str]
+    status: str
     thread_id: str
-    post_id: Optional[str] = None
-    messages: Annotated[list, add_messages]
+    post_id: Optional[str]
+    messages: Annotated[List[dict], add_messages]
+    error: Optional[str]
+    current_node: Optional[str]
 
-# Node Input Models
-class BlogNode(BaseModel):
+# Pydantic models for API requests only
+class StartWorkflowRequest(BaseModel):
     topic: str
-    thread_id: str
+    thread_id: Optional[str] = None
 
-class ThemeNode(BaseModel):
-    reference_type: Literal["series", "anime", "game"]
-    reference_name: str
+class ApplyThemeRequest(BaseModel):
     thread_id: str
+    theme_type: Literal["series", "anime", "game", "movie", "book"]
+    theme_name: str
 
-class PublishNode(BaseModel):
+class PublishRequest(BaseModel):
+    thread_id: str
     schedule_time: Optional[datetime] = None
+
+class GenerateTweetsRequest(BaseModel):
     thread_id: str
 
-class TweetNode(BaseModel):
-    generate_thread: bool = True
+class ContinueWorkflowRequest(BaseModel):
     thread_id: str
+    next_node: Optional[str] = None
 
-#  Initialize MongoDB checkpoint
+# FIXED: Following checkpointer.py pattern for MongoDB connection
 def get_checkpointer():
-    DB_URI = os.getenv("MONGODB_URI", "mongodb://admin:admin@localhost:27017")
-    return MongoDBSaver.from_conn_string(DB_URI)
+    """Get MongoDB checkpointer instance"""
+    DB_URI = os.getenv("MONGODB_URI", "mongodb://admin:admin@mongodb:27017")
+    try:
+        checkpointer = MongoDBSaver.from_conn_string(DB_URI)
+        logger.info("MongoDB checkpointer initialized successfully")
+        return checkpointer
+    except Exception as e:
+        logger.error(f"Failed to initialize MongoDB checkpointer: {e}")
+        raise
 
-#  Node Processing Functions
-def process_blog_node(state: WorkflowState) -> WorkflowState:
-    topic = state.blog_topic or "default_topic"
-    prompt = f"write a blog post about {topic}"
-
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {"role": "system", "content": "You are a professional blog writer."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    state.blog_content = response.choices[0].message.content
-    state.status = "blog_created"
-    return state
-
-def process_theme_node(state: WorkflowState) -> WorkflowState:
-    if not state.blog_content:
-        raise HTTPException(status_code=400, detail="Blog content must be generated first")
-
-    theme_reference = state.theme_reference or "default_theme"
-    prompt = f"Rewrite the following blog post in the style of {theme_reference} '{theme_reference}':\n{state.blog_content}"
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {"role": "system", "content": f"You are a creative writer who specializes in {theme_reference} style writing."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    state.blog_topic = response.choices[0].message.content
-    state.status = "theme_applied"
-    return state
-
-def process_publish_node(state: WorkflowState) -> WorkflowState:
-    if not state.blog_content:
-        raise HTTPException(status_code=400, detail="Blog content must be generated first")
-
-    # Initialize Hashnode API
-    hashnode_api_key = os.getenv("HASHNODE_API_KEY")
-    if not hashnode_api_key:
-        raise HTTPException(status_code=500, detail="Hashnode API key not found")
-    
-    # Hashnode GraphQL endpoint
-    url = "https://api.hashnode.com/"
-    
-    # GraphQL mutation for creating a post
-    mutation = """
-    mutation CreatePublicationStory($input: CreateStoryInput!) {
-        createPublicationStory(input: $input) {
-            post {
-                _id
-                title
-                slug
-                url
-            }
-        }
-    }
-    """
-    
-    # Prepare the input data
-    variables = {
-        "input": {
-            "title": state.blog_topic,
-            "contentMarkdown": state.blog_content,
-            "tags": [],
-            "isRepublished": False,
-            "publishToPublication": True,
-            "isDraft": True if state.publish_date else False
-        }
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": hashnode_api_key
-    }
+# FIXED: Node functions that properly handle state
+def blog_generation_node(state: BlogWorkflowState) -> BlogWorkflowState:
+    """Generate blog content based on topic"""
+    logger.info(f"Generating blog for topic: {state.get('blog_topic')}")
     
     try:
+        topic = state.get("blog_topic")
+        if not topic:
+            raise ValueError("Blog topic is required")
+            
+        prompt = f"""Write a comprehensive blog post about: {topic}
+        
+        Please include:
+        - An engaging title (start with # for markdown)
+        - Introduction
+        - Main content with clear sections
+        - Conclusion
+        - Format it in markdown
+        
+        Make it informative and engaging, around 800-1200 words.
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a professional blog writer who creates engaging, well-structured content."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.7
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("Failed to generate blog content")
+
+        # Return updated state
+        return {
+            **state,
+            "blog_content": content,
+            "status": "blog_generated",
+            "current_node": "blog_generation",
+            "messages": [
+                *state.get("messages", []),
+                {
+                    "role": "assistant",
+                    "content": f"Blog generated successfully for topic: {topic}",
+                    "timestamp": datetime.now().isoformat()
+                }
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in blog generation: {str(e)}")
+        return {
+            **state,
+            "error": f"Blog generation failed: {str(e)}",
+            "status": "error",
+            "current_node": "blog_generation"
+        }
+
+def theme_application_node(state: BlogWorkflowState) -> BlogWorkflowState:
+    """Apply theme styling to the blog content"""
+    logger.info(f"Applying theme: {state.get('theme_reference')}")
+    
+    try:
+        if not state.get("blog_content"):
+            raise ValueError("Blog content must be generated first")
+            
+        theme_ref = state.get("theme_reference")
+        theme_type = state.get("theme_type", "series")
+        
+        if not theme_ref:
+            # Skip theme application if no theme specified
+            return {
+                **state,
+                "status": "theme_skipped",
+                "current_node": "theme_application"
+            }
+            
+        prompt = f"""Rewrite the following blog post in the style and tone of the {theme_type} '{theme_ref}'.
+        
+        Instructions:
+        - Maintain the core information and structure
+        - Adapt the writing style, tone, and examples to match the {theme_type}
+        - Keep it engaging and authentic to the {theme_type}'s style
+        - Preserve the markdown formatting
+        - Keep the same length and depth
+        
+        Original blog post:
+        {state['blog_content']}
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": f"You are a creative writer who specializes in adapting content to match the style of various {theme_type}s."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.8
+        )
+
+        themed_content = response.choices[0].message.content
+        if not themed_content:
+            raise ValueError("Failed to apply theme")
+
+        return {
+            **state,
+            "blog_content": themed_content,
+            "status": "theme_applied",
+            "current_node": "theme_application",
+            "messages": [
+                *state.get("messages", []),
+                {
+                    "role": "assistant",
+                    "content": f"Theme '{theme_ref}' applied successfully",
+                    "timestamp": datetime.now().isoformat()
+                }
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in theme application: {str(e)}")
+        return {
+            **state,
+            "error": f"Theme application failed: {str(e)}",
+            "status": "error",
+            "current_node": "theme_application"
+        }
+
+def publish_node(state: BlogWorkflowState) -> BlogWorkflowState:
+    """Publish blog to Hashnode"""
+    logger.info(f"Publishing blog to Hashnode for thread: {state.get('thread_id')}")
+    
+    try:
+        if not state.get("blog_content"):
+            raise ValueError("Blog content must be generated first")
+            
+        # Extract title from blog content
+        if state["blog_content"] is None:
+            raise ValueError("Blog content is required")
+
+        content_lines = state["blog_content"].split('\n')
+        title = state.get("blog_topic", "Generated Blog Post")
+        
+        # Find title in markdown format
+        for line in content_lines:
+            if line.startswith('# '):
+                title = line[2:].strip()
+                break
+                
+        hashnode_api_key = os.getenv("HASHNODE_API_KEY")
+        if not hashnode_api_key:
+            raise ValueError("Hashnode API key not configured")
+            
+        url = "https://gql.hashnode.com/"
+        
+        mutation = """
+        mutation PublishPost($input: PublishPostInput!) {
+            publishPost(input: $input) {
+                post {
+                    id
+                    title
+                    slug
+                    url
+                }
+            }
+        }
+        """
+        
+        publication_id = os.getenv("HASHNODE_PUBLICATION_ID")
+        if not publication_id:
+            raise ValueError("Hashnode publication ID not configured")
+            
+        variables = {
+            "input": {
+                "title": title,
+                "contentMarkdown": state["blog_content"],
+                "publicationId": publication_id,
+                "tags": [],
+                "publishedAt": state.get("publish_date"),
+                "isDraft": False
+            }
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {hashnode_api_key}"
+        }
+        
         response = requests.post(
             url,
             json={"query": mutation, "variables": variables},
-            headers=headers
+            headers=headers,
+            timeout=30
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            if "errors" in result:
-                raise HTTPException(status_code=500, detail=f"Hashnode API error: {result['errors']}")
+        if response.status_code != 200:
+            raise ValueError(f"Hashnode API request failed: {response.text}")
             
-            post_data = result["data"]["createPublicationStory"]["post"]
-            state.publish_date = state.publish_date
-            state.status = "published"
-            state.post_id = post_data["_id"]
-        else:
-            raise HTTPException(status_code=500, detail=f"Hashnode API request failed: {response.text}")
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to publish to Hashnode: {str(e)}")
-    
-    return state
-
-def process_tweet_node(state: WorkflowState) -> WorkflowState:
-    if not state.blog_content:
-        raise HTTPException(status_code=400, detail="Blog content must be generated first")
-    
-    prompt = f"Convert this blog post into a Twitter thread (max 10 tweets):\n{state.blog_content}"
-
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {"role": "system", "content": "Create an engaging Twitter thread from the given blog post."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    content = response.choices[0].message.content
-    if not content:
-        raise HTTPException(status_code=500, detail="Failed to generate tweet content")
-    
-    thread = content.split('\n')
-    
-    # Uncomment to enable Twitter posting
-    # auth = tweepy.OAuthHandler(os.getenv("TWITTER_API_KEY"), os.getenv("TWITTER_API_SECRET"))
-    # auth.set_access_token(os.getenv("TWITTER_ACCESS_TOKEN"), os.getenv("TWITTER_ACCESS_TOKEN_SECRET"))
-    # twitter_api = tweepy.API(auth)
-    
-    # previous_tweet_id = None
-    # for tweet in thread:
-    #     status = twitter_api.update_status(status=tweet, in_reply_to_status_id=previous_tweet_id)
-    #     previous_tweet_id = status.id
-    
-    state.tweet_thread = thread
-    return state
-
-#  Create the workflow graph
-def create_workflow_graph():
-    graph = StateGraph(WorkflowState)
-    graph.add_node("blog", process_blog_node)
-    graph.add_node("theme", process_theme_node)
-    graph.add_node("publish", process_publish_node)
-    graph.add_node("tweet", process_tweet_node)
-
-    graph.add_edge(START, "blog")
-    graph.add_edge("blog", "theme")
-    graph.add_edge("theme", "publish")
-    graph.add_edge("publish", "tweet")
-    graph.add_edge("tweet", END)
-
-    return graph.compile()
-
-# API Endpoints
-@app.post("/workflow/start", response_model=Dict)
-async def start_workflow(blog_input: BlogNode):
-    """Start a new workflow with checkpointing"""
-    try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
-        
-        # Initialize state
-        initial_state = WorkflowState(
-            blog_topic=blog_input.topic,
-            theme_reference=None,
-            blog_content=None,
-            tweet_thread=None,
-            publish_date=None,
-            status="pending",
-            thread_id=blog_input.thread_id,
-            messages=[]
-        )
-        
-        # Run the workflow
-        result = graph.invoke(initial_state, checkpointer=checkpointer)
+        result = response.json()
+        if "errors" in result:
+            raise ValueError(f"Hashnode API error: {result['errors']}")
+            
+        post_data = result["data"]["publishPost"]["post"]
         
         return {
-            "thread_id": blog_input.thread_id,
-            "status": "workflow_started",
-            "current_state": result
+            **state,
+            "post_id": post_data["id"],
+            "status": "published",
+            "current_node": "publish",
+            "messages": [
+                *state.get("messages", []),
+                {
+                    "role": "assistant",
+                    "content": f"Blog published successfully: {post_data['url']}",
+                    "timestamp": datetime.now().isoformat()
+                }
+            ]
         }
+        
     except Exception as e:
+        logger.error(f"Error in publishing: {str(e)}")
+        return {
+            **state,
+            "error": f"Publishing failed: {str(e)}",
+            "status": "error",
+            "current_node": "publish"
+        }
+
+def tweet_generation_node(state: BlogWorkflowState) -> BlogWorkflowState:
+    """Generate Twitter thread from blog content"""
+    logger.info(f"Generating Twitter thread for thread: {state.get('thread_id')}")
+    
+    try:
+        if not state.get("blog_content"):
+            raise ValueError("Blog content must be generated first")
+            
+        # Get first 1500 characters for context
+        if state["blog_content"] is None:
+            raise ValueError("Blog content is required")
+
+        blog_excerpt = state["blog_content"][:1500]
+        
+        prompt = f"""Convert the following blog post into an engaging Twitter thread.
+        
+        Instructions:
+        - Create 5-8 tweets maximum
+        - Each tweet should be under 280 characters
+        - Start with a hook tweet
+        - Include key points from the blog
+        - End with a call to action
+        - Number each tweet (1/n, 2/n, etc.)
+        - Make it engaging and shareable
+        - Each tweet should be on a new line
+        
+        Blog content excerpt:
+        {blog_excerpt}...
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a social media expert who creates engaging Twitter threads."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.8
+        )
+
+        thread_content = response.choices[0].message.content
+        if not thread_content:
+            raise ValueError("Failed to generate Twitter thread")
+            
+        # Parse the thread into individual tweets
+        tweets = []
+        lines = thread_content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('Tweet') or line.startswith('Thread'):
+                continue
+                
+            if line.startswith(('1/', '2/', '3/', '4/', '5/', '6/', '7/', '8/')):
+                parts = line.split(' ', 1)
+                if len(parts) > 1:
+                    line = parts[1]
+                    
+            if len(line) > 10 and len(line) <= 280:
+                tweets.append(line)
+        
+        if not tweets:
+            tweets = [f"Just wrote a blog post about {state.get('blog_topic', 'an interesting topic')}! 🧵 Thread below:"]
+            
+        return {
+            **state,
+            "tweet_thread": tweets,
+            "status": "tweets_generated",
+            "current_node": "tweet_generation",
+            "messages": [
+                *state.get("messages", []),
+                {
+                    "role": "assistant",
+                    "content": f"Generated Twitter thread with {len(tweets)} tweets",
+                    "timestamp": datetime.now().isoformat()
+                }
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in tweet generation: {str(e)}")
+        return {
+            **state,
+            "error": f"Tweet generation failed: {str(e)}",
+            "status": "error",
+            "current_node": "tweet_generation"
+        }
+
+# FIXED: Following checkpointer.py pattern for graph compilation
+def compile_graph_with_checkpointer(checkpointer):
+    """Compile graph with checkpointer following checkpointer.py pattern"""
+    graph_builder = StateGraph(BlogWorkflowState)
+    
+    # Add nodes
+    graph_builder.add_node("blog_generation", blog_generation_node)
+    graph_builder.add_node("theme_application", theme_application_node)
+    graph_builder.add_node("publish", publish_node)
+    graph_builder.add_node("tweet_generation", tweet_generation_node)
+    
+    # Add edges - simple linear flow like in checkpointer.py
+    graph_builder.add_edge(START, "blog_generation")
+    graph_builder.add_edge("blog_generation", "theme_application")
+    graph_builder.add_edge("theme_application", "publish")
+    graph_builder.add_edge("publish", "tweet_generation")
+    graph_builder.add_edge("tweet_generation", END)
+    
+    # Compile with checkpointer
+    graph_with_checkpointer = graph_builder.compile(checkpointer=checkpointer)
+    return graph_with_checkpointer
+
+# Global workflow instance
+_workflow = None
+
+def get_workflow():
+    """Get or create the workflow instance"""
+    global _workflow
+    if _workflow is None:
+        checkpointer = get_checkpointer()
+        _workflow = compile_graph_with_checkpointer(checkpointer)
+        logger.info("Workflow compiled successfully")
+    return _workflow
+
+# FIXED: API endpoints with proper state handling
+@app.post("/workflow/start")
+async def start_workflow(request: StartWorkflowRequest):
+    """Start a new blog workflow"""
+    try:
+        thread_id = request.thread_id or str(uuid.uuid4())
+        workflow = get_workflow()
+        
+        # Create initial state following the TypedDict structure
+        initial_state: BlogWorkflowState = {
+            "blog_topic": request.topic,
+            "theme_reference": None,
+            "theme_type": None,
+            "blog_content": None,
+            "tweet_thread": None,
+            "publish_date": None,
+            "status": "started",
+            "thread_id": thread_id,
+            "post_id": None,
+            "messages": [],
+            "error": None,
+            "current_node": None
+        }
+        
+        # Configuration for checkpointing - following checkpointer.py pattern
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        
+        # Execute the workflow
+        result = workflow.invoke(initial_state, config)
+        
+        return {
+            "thread_id": thread_id,
+            "status": result.get("status"),
+            "current_node": result.get("current_node"),
+            "message": "Workflow started and blog generated",
+            "has_blog_content": bool(result.get("blog_content")),
+            "error": result.get("error")
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting workflow: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to start workflow: {str(e)}")
 
-@app.post("/workflow/continue", response_model=Dict)
-async def continue_workflow(thread_id: str):
-    """Continue an existing workflow from its current state"""
+@app.post("/workflow/apply-theme")
+async def apply_theme(request: ApplyThemeRequest):
+    """Apply theme to existing workflow"""
     try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
+        workflow = get_workflow()
+        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
         
-        config = {"configurable": {"thread_id": thread_id}}
-
         # Get current state
-        current_state = graph.get_state(config=config)
-        if not current_state:
+        current_state_snapshot = workflow.get_state(config)
+        if not current_state_snapshot or not current_state_snapshot.values:
             raise HTTPException(status_code=404, detail="Workflow not found")
+            
+        # Update state with theme information - cast to BlogWorkflowState
+        current_state = dict(current_state_snapshot.values)  # Convert to dict
+        updated_state = {
+            **current_state,
+            "theme_reference": request.theme_name,
+            "theme_type": request.theme_type
+        }  # Remove explicit typing
         
-        if not current_state:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        # Apply theme using the theme_application_node directly
+        result = theme_application_node(updated_state)  # type: ignore
         
-        # Continue from current state
-        result = graph.invoke(current_state, checkpointer=checkpointer)
+        # Update the state in the checkpointer
+        workflow.update_state(config, result)
         
         return {
-            "thread_id": thread_id,
-            "status": "workflow_continued",
-            "current_state": result
+            "thread_id": request.thread_id,
+            "status": result.get("status"),
+            "current_node": result.get("current_node"),
+            "message": "Theme applied successfully",
+            "has_blog_content": bool(result.get("blog_content")),
+            "error": result.get("error")
         }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to continue workflow: {str(e)}")
-
-@app.get("/workflow/status/{thread_id}", response_model=Dict)
-async def get_workflow_status(thread_id: str):
-    """Get the current status of a workflow"""
-    try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
-        
-        config = {"configurable": {"thread_id": thread_id}}
-        current_state = graph.get_state(config, checkpointer=checkpointer)
-        
-        if not current_state:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-        
-        return {
-            "thread_id": thread_id,
-            "status": current_state.get("status", "unknown"),
-            "current_state": current_state
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get workflow status: {str(e)}")
-
-@app.post("/workflow/apply-theme", response_model=Dict)
-async def apply_theme_to_workflow(theme_input: ThemeNode):
-    """Apply theme to an existing workflow"""
-    try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
-        
-        config = {"configurable": {"thread_id": theme_input.thread_id}}
-        current_state = graph.get_state(config, checkpointer=checkpointer)
-        
-        if not current_state:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-        
-        # Update state with theme
-        updated_state = process_theme_node(current_state, theme_input)
-        
-        # Save updated state
-        graph.invoke(updated_state, config, checkpointer=checkpointer)
-        
-        return {
-            "thread_id": theme_input.thread_id,
-            "status": "theme_applied",
-            "current_state": updated_state
-        }
-    except Exception as e:
+        logger.error(f"Error applying theme: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to apply theme: {str(e)}")
 
-@app.post("/workflow/publish", response_model=Dict)
-async def publish_workflow(publish_input: PublishNode):
-    """Publish an existing workflow"""
+@app.post("/workflow/publish")
+async def publish_blog(request: PublishRequest):
+    """Publish blog to Hashnode"""
     try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
+        workflow = get_workflow()
+        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
         
-        config = {"configurable": {"thread_id": publish_input.thread_id}}
-        current_state = graph.get_state(config, checkpointer=checkpointer)
-        
-        if not current_state:
+        # Get current state
+        current_state_snapshot = workflow.get_state(config)
+        if not current_state_snapshot or not current_state_snapshot.values:
             raise HTTPException(status_code=404, detail="Workflow not found")
+            
+        # Update state with publish date if provided
+        current_state = dict(current_state_snapshot.values)
+        updated_state = {
+            **current_state,
+            "publish_date": request.schedule_time.isoformat() if request.schedule_time else None
+        }
         
-        # Update state with publish
-        updated_state = process_publish_node(current_state, publish_input)
+        # Publish using the publish_node directly
+        result = publish_node(updated_state)  # type: ignore
         
-        # Save updated state
-        graph.invoke(updated_state, config, checkpointer=checkpointer)
+        # Update the state in the checkpointer
+        workflow.update_state(config, result)
         
         return {
-            "thread_id": publish_input.thread_id,
-            "status": "published",
-            "current_state": updated_state
+            "thread_id": request.thread_id,
+            "status": result.get("status"),
+            "current_node": result.get("current_node"),
+            "message": "Blog published successfully",
+            "post_id": result.get("post_id"),
+            "error": result.get("error")
         }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to publish: {str(e)}")
+        logger.error(f"Error publishing blog: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to publish blog: {str(e)}")
 
-@app.post("/workflow/generate-tweets", response_model=Dict)
-async def generate_tweets_for_workflow(tweet_input: TweetNode):
-    """Generate tweets for an existing workflow"""
+@app.post("/workflow/generate-tweets")
+async def generate_tweets(request: GenerateTweetsRequest):
+    """Generate Twitter thread for blog"""
     try:
-        checkpointer = get_checkpointer()
-        graph = create_workflow_graph()
+        workflow = get_workflow()
+        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
         
-        config = {"configurable": {"thread_id": tweet_input.thread_id}}
-        current_state = graph.get_state(config, checkpointer=checkpointer)
-        
-        if not current_state:
+        # Get current state
+        current_state_snapshot = workflow.get_state(config)
+        if not current_state_snapshot or not current_state_snapshot.values:
             raise HTTPException(status_code=404, detail="Workflow not found")
+            
+        # Generate tweets using the tweet_generation_node directly
+        result = tweet_generation_node(current_state_snapshot.values)  # type: ignore
         
-        # Update state with tweets
-        updated_state = process_tweet_node(current_state, tweet_input)
-        
-        # Save updated state
-        graph.invoke(updated_state, config, checkpointer=checkpointer)
+        # Update the state in the checkpointer
+        workflow.update_state(config, result)
         
         return {
-            "thread_id": tweet_input.thread_id,
-            "status": "tweets_generated",
-            "current_state": updated_state
+            "thread_id": request.thread_id,
+            "status": result.get("status"),
+            "current_node": result.get("current_node"),
+            "message": "Twitter thread generated successfully",
+            "tweet_count": len(result.get("tweet_thread") or []),
+            "error": result.get("error")
         }
+        
     except Exception as e:
+        logger.error(f"Error generating tweets: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate tweets: {str(e)}")
 
+@app.get("/workflow/status/{thread_id}")
+async def get_workflow_status(thread_id: str):
+    """Get current workflow status"""
+    try:
+        workflow = get_workflow()
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        current_state_snapshot = workflow.get_state(config)
+        
+        if not current_state_snapshot or not current_state_snapshot.values:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+            
+        state = current_state_snapshot.values
+        
+        return {
+            "thread_id": thread_id,
+            "status": state.get("status"),
+            "current_node": state.get("current_node"),
+            "blog_topic": state.get("blog_topic"),
+            "theme_reference": state.get("theme_reference"),
+            "has_blog_content": bool(state.get("blog_content")),
+            "has_tweets": bool(state.get("tweet_thread")),
+            "post_id": state.get("post_id"),
+            "error": state.get("error")
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting workflow status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get workflow status: {str(e)}")
+
+@app.get("/workflow/content/{thread_id}")
+async def get_workflow_content(thread_id: str):
+    """Get full workflow content"""
+    try:
+        workflow = get_workflow()
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        current_state_snapshot = workflow.get_state(config)
+        
+        if not current_state_snapshot or not current_state_snapshot.values:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+            
+        state = current_state_snapshot.values
+        
+        return {
+            "thread_id": thread_id,
+            "blog_topic": state.get("blog_topic"),
+            "blog_content": state.get("blog_content"),
+            "tweet_thread": state.get("tweet_thread"),
+            "theme_reference": state.get("theme_reference"),
+            "theme_type": state.get("theme_type"),
+            "status": state.get("status"),
+            "current_node": state.get("current_node"),
+            "post_id": state.get("post_id"),
+            "messages": state.get("messages", []),
+            "error": state.get("error")
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting workflow content: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get workflow content: {str(e)}")
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Blog Workflow API", 
+        "version": "2.0.0",
+        "endpoints": {
+            "start": "POST /workflow/start",
+            "apply_theme": "POST /workflow/apply-theme",
+            "publish": "POST /workflow/publish",
+            "generate_tweets": "POST /workflow/generate-tweets",
+            "status": "GET /workflow/status/{thread_id}",
+            "content": "GET /workflow/content/{thread_id}"
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
