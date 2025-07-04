@@ -414,56 +414,62 @@ def compile_graph_with_checkpointer(checkpointer):
     graph_with_checkpointer = graph_builder.compile(checkpointer=checkpointer)
     return graph_with_checkpointer
 
-# Global workflow instance
-_workflow = None
+# FIXED: Remove global workflow instance and handle context properly
+def get_workflow_with_checkpointer():
+    """Get workflow instance with proper context management"""
+    DB_URI = os.getenv("MONGODB_URI", "mongodb://admin:admin@mongodb:27017")
+    try:
+        # Create the MongoDBSaver context manager
+        checkpointer = MongoDBSaver.from_conn_string(DB_URI)
+        logger.info("MongoDB checkpointer initialized successfully")
+        return checkpointer
+    except Exception as e:
+        logger.error(f"Failed to initialize MongoDB checkpointer: {e}")
+        raise
 
-def get_workflow():
-    """Get or create the workflow instance"""
-    global _workflow
-    if _workflow is None:
-        checkpointer = get_checkpointer()
-        _workflow = compile_graph_with_checkpointer(checkpointer)
-        logger.info("Workflow compiled successfully")
-    return _workflow
-
-# FIXED: API endpoints with proper state handling
+# FIXED: API endpoints with proper context management
 @app.post("/workflow/start")
 async def start_workflow(request: StartWorkflowRequest):
     """Start a new blog workflow"""
     try:
         thread_id = request.thread_id or str(uuid.uuid4())
-        workflow = get_workflow()
         
-        # Create initial state following the TypedDict structure
-        initial_state: BlogWorkflowState = {
-            "blog_topic": request.topic,
-            "theme_reference": None,
-            "theme_type": None,
-            "blog_content": None,
-            "tweet_thread": None,
-            "publish_date": None,
-            "status": "started",
-            "thread_id": thread_id,
-            "post_id": None,
-            "messages": [],
-            "error": None,
-            "current_node": None
-        }
-        
-        # Configuration for checkpointing - following checkpointer.py pattern
-        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        
-        # Execute the workflow
-        result = workflow.invoke(initial_state, config)
-        
-        return {
-            "thread_id": thread_id,
-            "status": result.get("status"),
-            "current_node": result.get("current_node"),
-            "message": "Workflow started and blog generated",
-            "has_blog_content": bool(result.get("blog_content")),
-            "error": result.get("error")
-        }
+        # Use the checkpointer as a context manager
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            # Compile the graph with the checkpointer
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            
+            # Create initial state following the TypedDict structure
+            initial_state: BlogWorkflowState = {
+                "blog_topic": request.topic,
+                "theme_reference": None,
+                "theme_type": None,
+                "blog_content": None,
+                "tweet_thread": None,
+                "publish_date": None,
+                "status": "started",
+                "thread_id": thread_id,
+                "post_id": None,
+                "messages": [],
+                "error": None,
+                "current_node": None
+            }
+            
+            # Configuration for checkpointing - following checkpointer.py pattern
+            config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+            
+            # Execute the workflow
+            result = workflow.invoke(initial_state, config)
+            
+            return {
+                "thread_id": thread_id,
+                "status": result.get("status"),
+                "current_node": result.get("current_node"),
+                "message": "Workflow started and blog generated",
+                "has_blog_content": bool(result.get("blog_content")),
+                "error": result.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error starting workflow: {str(e)}")
@@ -473,36 +479,38 @@ async def start_workflow(request: StartWorkflowRequest):
 async def apply_theme(request: ApplyThemeRequest):
     """Apply theme to existing workflow"""
     try:
-        workflow = get_workflow()
-        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
-        
-        # Get current state
-        current_state_snapshot = workflow.get_state(config)
-        if not current_state_snapshot or not current_state_snapshot.values:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
             
-        # Update state with theme information - cast to BlogWorkflowState
-        current_state = dict(current_state_snapshot.values)  # Convert to dict
-        updated_state = {
-            **current_state,
-            "theme_reference": request.theme_name,
-            "theme_type": request.theme_type
-        }  # Remove explicit typing
-        
-        # Apply theme using the theme_application_node directly
-        result = theme_application_node(updated_state)  # type: ignore
-        
-        # Update the state in the checkpointer
-        workflow.update_state(config, result)
-        
-        return {
-            "thread_id": request.thread_id,
-            "status": result.get("status"),
-            "current_node": result.get("current_node"),
-            "message": "Theme applied successfully",
-            "has_blog_content": bool(result.get("blog_content")),
-            "error": result.get("error")
-        }
+            # Get current state
+            current_state_snapshot = workflow.get_state(config)
+            if not current_state_snapshot or not current_state_snapshot.values:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+                
+            # Update state with theme information - cast to BlogWorkflowState
+            current_state = dict(current_state_snapshot.values)  # Convert to dict
+            updated_state = {
+                **current_state,
+                "theme_reference": request.theme_name,
+                "theme_type": request.theme_type
+            }  # Remove explicit typing
+            
+            # Apply theme using the theme_application_node directly
+            result = theme_application_node(updated_state)  # type: ignore
+            
+            # Update the state in the checkpointer
+            workflow.update_state(config, result)
+            
+            return {
+                "thread_id": request.thread_id,
+                "status": result.get("status"),
+                "current_node": result.get("current_node"),
+                "message": "Theme applied successfully",
+                "has_blog_content": bool(result.get("blog_content")),
+                "error": result.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error applying theme: {str(e)}")
@@ -512,35 +520,37 @@ async def apply_theme(request: ApplyThemeRequest):
 async def publish_blog(request: PublishRequest):
     """Publish blog to Hashnode"""
     try:
-        workflow = get_workflow()
-        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
-        
-        # Get current state
-        current_state_snapshot = workflow.get_state(config)
-        if not current_state_snapshot or not current_state_snapshot.values:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
             
-        # Update state with publish date if provided
-        current_state = dict(current_state_snapshot.values)
-        updated_state = {
-            **current_state,
-            "publish_date": request.schedule_time.isoformat() if request.schedule_time else None
-        }
-        
-        # Publish using the publish_node directly
-        result = publish_node(updated_state)  # type: ignore
-        
-        # Update the state in the checkpointer
-        workflow.update_state(config, result)
-        
-        return {
-            "thread_id": request.thread_id,
-            "status": result.get("status"),
-            "current_node": result.get("current_node"),
-            "message": "Blog published successfully",
-            "post_id": result.get("post_id"),
-            "error": result.get("error")
-        }
+            # Get current state
+            current_state_snapshot = workflow.get_state(config)
+            if not current_state_snapshot or not current_state_snapshot.values:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+                
+            # Update state with publish date if provided
+            current_state = dict(current_state_snapshot.values)
+            updated_state = {
+                **current_state,
+                "publish_date": request.schedule_time.isoformat() if request.schedule_time else None
+            }
+            
+            # Publish using the publish_node directly
+            result = publish_node(updated_state)  # type: ignore
+            
+            # Update the state in the checkpointer
+            workflow.update_state(config, result)
+            
+            return {
+                "thread_id": request.thread_id,
+                "status": result.get("status"),
+                "current_node": result.get("current_node"),
+                "message": "Blog published successfully",
+                "post_id": result.get("post_id"),
+                "error": result.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error publishing blog: {str(e)}")
@@ -550,28 +560,30 @@ async def publish_blog(request: PublishRequest):
 async def generate_tweets(request: GenerateTweetsRequest):
     """Generate Twitter thread for blog"""
     try:
-        workflow = get_workflow()
-        config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
-        
-        # Get current state
-        current_state_snapshot = workflow.get_state(config)
-        if not current_state_snapshot or not current_state_snapshot.values:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            config: RunnableConfig = {"configurable": {"thread_id": request.thread_id}}
             
-        # Generate tweets using the tweet_generation_node directly
-        result = tweet_generation_node(current_state_snapshot.values)  # type: ignore
-        
-        # Update the state in the checkpointer
-        workflow.update_state(config, result)
-        
-        return {
-            "thread_id": request.thread_id,
-            "status": result.get("status"),
-            "current_node": result.get("current_node"),
-            "message": "Twitter thread generated successfully",
-            "tweet_count": len(result.get("tweet_thread") or []),
-            "error": result.get("error")
-        }
+            # Get current state
+            current_state_snapshot = workflow.get_state(config)
+            if not current_state_snapshot or not current_state_snapshot.values:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+                
+            # Generate tweets using the tweet_generation_node directly
+            result = tweet_generation_node(current_state_snapshot.values)  # type: ignore
+            
+            # Update the state in the checkpointer
+            workflow.update_state(config, result)
+            
+            return {
+                "thread_id": request.thread_id,
+                "status": result.get("status"),
+                "current_node": result.get("current_node"),
+                "message": "Twitter thread generated successfully",
+                "tweet_count": len(result.get("tweet_thread") or []),
+                "error": result.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error generating tweets: {str(e)}")
@@ -581,26 +593,28 @@ async def generate_tweets(request: GenerateTweetsRequest):
 async def get_workflow_status(thread_id: str):
     """Get current workflow status"""
     try:
-        workflow = get_workflow()
-        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        current_state_snapshot = workflow.get_state(config)
-        
-        if not current_state_snapshot or not current_state_snapshot.values:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+            current_state_snapshot = workflow.get_state(config)
             
-        state = current_state_snapshot.values
-        
-        return {
-            "thread_id": thread_id,
-            "status": state.get("status"),
-            "current_node": state.get("current_node"),
-            "blog_topic": state.get("blog_topic"),
-            "theme_reference": state.get("theme_reference"),
-            "has_blog_content": bool(state.get("blog_content")),
-            "has_tweets": bool(state.get("tweet_thread")),
-            "post_id": state.get("post_id"),
-            "error": state.get("error")
-        }
+            if not current_state_snapshot or not current_state_snapshot.values:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+                
+            state = current_state_snapshot.values
+            
+            return {
+                "thread_id": thread_id,
+                "status": state.get("status"),
+                "current_node": state.get("current_node"),
+                "blog_topic": state.get("blog_topic"),
+                "theme_reference": state.get("theme_reference"),
+                "has_blog_content": bool(state.get("blog_content")),
+                "has_tweets": bool(state.get("tweet_thread")),
+                "post_id": state.get("post_id"),
+                "error": state.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error getting workflow status: {str(e)}")
@@ -610,28 +624,30 @@ async def get_workflow_status(thread_id: str):
 async def get_workflow_content(thread_id: str):
     """Get full workflow content"""
     try:
-        workflow = get_workflow()
-        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        current_state_snapshot = workflow.get_state(config)
-        
-        if not current_state_snapshot or not current_state_snapshot.values:
-            raise HTTPException(status_code=404, detail="Workflow not found")
+        checkpointer = get_workflow_with_checkpointer()
+        with checkpointer as mongo_checkpointer:
+            workflow = compile_graph_with_checkpointer(mongo_checkpointer)
+            config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+            current_state_snapshot = workflow.get_state(config)
             
-        state = current_state_snapshot.values
-        
-        return {
-            "thread_id": thread_id,
-            "blog_topic": state.get("blog_topic"),
-            "blog_content": state.get("blog_content"),
-            "tweet_thread": state.get("tweet_thread"),
-            "theme_reference": state.get("theme_reference"),
-            "theme_type": state.get("theme_type"),
-            "status": state.get("status"),
-            "current_node": state.get("current_node"),
-            "post_id": state.get("post_id"),
-            "messages": state.get("messages", []),
-            "error": state.get("error")
-        }
+            if not current_state_snapshot or not current_state_snapshot.values:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+                
+            state = current_state_snapshot.values
+            
+            return {
+                "thread_id": thread_id,
+                "blog_topic": state.get("blog_topic"),
+                "blog_content": state.get("blog_content"),
+                "tweet_thread": state.get("tweet_thread"),
+                "theme_reference": state.get("theme_reference"),
+                "theme_type": state.get("theme_type"),
+                "status": state.get("status"),
+                "current_node": state.get("current_node"),
+                "post_id": state.get("post_id"),
+                "messages": state.get("messages", []),
+                "error": state.get("error")
+            }
         
     except Exception as e:
         logger.error(f"Error getting workflow content: {str(e)}")
