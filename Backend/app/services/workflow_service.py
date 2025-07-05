@@ -1,0 +1,144 @@
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from langchain_core.runnables import RunnableConfig
+from ..workflows.workflow_graph import compile_workflow_with_checkpointer
+from ..schemas.workflow_state import WorkflowState, WorkflowRequest, HumanInputRequest
+from ..core.config import settings
+import uuid
+from typing import Dict, Any
+
+class WorkflowService:
+    def __init__(self):
+        self.mongo_uri = settings.MONGODB_URL
+        self.checkpointer = None
+    
+    async def get_checkpointer(self):
+        """Get or create MongoDB checkpointer"""
+        if not self.checkpointer:
+            self.checkpointer = MongoDBSaver.from_conn_string(self.mongo_uri).__enter__()
+        return self.checkpointer
+    
+    async def start_workflow(self, request: WorkflowRequest) -> Dict[str, Any]:
+        """Start a new workflow"""
+        checkpointer = await self.get_checkpointer()
+        workflow = compile_workflow_with_checkpointer(checkpointer)
+        
+        # Generate unique thread ID
+        thread_id = str(uuid.uuid4())
+        
+        # Initialize state
+        initial_state = WorkflowState(
+            messages=[],
+            user_id=request.user_id,
+            topic=request.topic,
+            theme=request.theme,
+            blog_content=None,
+            themed_blog=None,
+            twitter_thread=None,
+            hashnode_post=None,
+            twitter_post=None,
+            publish_schedule={
+                "twitter": request.schedule_twitter,
+                "hashnode": request.schedule_hashnode
+            },
+            workflow_status="initialized",
+            current_node="start",
+            human_input=None
+        )
+        
+        # Configure the workflow
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id
+            }
+        }
+        
+        # Start the workflow
+        result = workflow.invoke(initial_state, config)
+        
+        return {
+            "thread_id": thread_id,
+            "status": result.get("workflow_status", "started"),
+            "current_node": result.get("current_node", "start"),
+            "message": "Workflow started successfully",
+            "requires_human_input": self._requires_human_input(result.get("current_node", "")),
+            "result": result
+        }
+    
+    async def provide_human_input(self, request: HumanInputRequest) -> Dict[str, Any]:
+        """Provide human input to continue workflow"""
+        checkpointer = await self.get_checkpointer()
+        workflow = compile_workflow_with_checkpointer(checkpointer)
+        
+        # Get current state
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": request.thread_id
+            }
+        }
+        
+        # Update state with human input
+        update_state = WorkflowState(
+            messages=[],
+            user_id="",
+            topic="",
+            theme=None,
+            blog_content=None,
+            themed_blog=None,
+            twitter_thread=None,
+            hashnode_post=None,
+            twitter_post=None,
+            publish_schedule={},
+            workflow_status="",
+            current_node="",
+            human_input=request.user_input
+        )
+        
+        # Continue workflow
+        result = workflow.invoke(update_state, config)
+        
+        return {
+            "thread_id": request.thread_id,
+            "status": result.get("workflow_status", "continued"),
+            "current_node": result.get("current_node", ""),
+            "message": f"Workflow continued with input: {request.user_input}",
+            "requires_human_input": self._requires_human_input(result.get("current_node", "")),
+            "result": result
+        }
+    
+    async def get_workflow_status(self, thread_id: str) -> Dict[str, Any]:
+        """Get current workflow status"""
+        checkpointer = await self.get_checkpointer()
+        
+        # Get current state from checkpointer
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id
+            }
+        }
+        
+        try:
+            state = checkpointer.get(config)
+            if state:
+                return {
+                    "thread_id": thread_id,
+                    "status": state.get("workflow_status", "unknown"),
+                    "current_node": state.get("current_node", ""),
+                    "requires_human_input": self._requires_human_input(state.get("current_node", "")),
+                    "state": state
+                }
+            else:
+                return {
+                    "thread_id": thread_id,
+                    "status": "not_found",
+                    "message": "Workflow not found"
+                }
+        except Exception as e:
+            return {
+                "thread_id": thread_id,
+                "status": "error",
+                "message": str(e)
+            }
+    
+    def _requires_human_input(self, current_node: str) -> bool:
+        """Check if current node requires human input"""
+        return current_node in ["human_approval_hashnode", "human_approval_twitter"] 

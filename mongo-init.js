@@ -1,13 +1,20 @@
-// Create database and collections
-db = db.getSiblingDB('flowforge');
+// Create the database and user
+db = db.getSiblingDB('n8n_clone');
 
-// Create collections for workflow states
-db.createCollection('workflow_states');
-db.createCollection('checkpoints');
+db.createUser({
+  user: 'n8n_user',
+  pwd: 'n8n_password',
+  roles: [
+    {
+      role: 'readWrite',
+      db: 'n8n_clone'
+    }
+  ]
+});
 
-// Create indexes for better performance
-db.workflow_states.createIndex({ "thread_id": 1 }, { unique: true });
-db.checkpoints.createIndex({ "thread_id": 1 });
-db.checkpoints.createIndex({ "timestamp": 1 });
-
-print('MongoDB initialized for FlowForge');
+// Create collections with initial indexes
+db.users.createIndex({ "username": 1 }, { unique: true });
+db.users.createIndex({ "email": 1 }, { unique: true });
+db.workflows.createIndex({ "owner_id": 1 });
+db.workflow_executions.createIndex({ "workflow_id": 1 });
+db.workflow_executions.createIndex({ "status": 1 });

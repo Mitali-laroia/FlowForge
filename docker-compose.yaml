@@ -3,63 +3,74 @@ version: '3.8'
 services:
   mongodb:
     image: mongo:7.0
-    container_name: flowforge-mongodb
-    restart: always
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: admin
-      MONGO_INITDB_DATABASE: flowforge
+    container_name: n8n_mongodb
+    restart: unless-stopped
     ports:
       - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: n8n_clone
     volumes:
       - mongodb_data:/data/db
       - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     networks:
-      - flowforge-network
+      - n8n_network
 
-  mongo-express:
-    image: mongo-express:latest
-    container_name: flowforge-mongo-express
-    restart: always
-    environment:
-      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
-      ME_CONFIG_MONGODB_ADMINPASSWORD: admin
-      ME_CONFIG_MONGODB_URL: mongodb://admin:admin@mongodb:27017/
-      ME_CONFIG_BASICAUTH_USERNAME: admin
-      ME_CONFIG_BASICAUTH_PASSWORD: admin
+  redis:
+    image: redis:7.2-alpine
+    container_name: n8n_redis
+    restart: unless-stopped
     ports:
-      - "8081:8081"
-    depends_on:
-      - mongodb
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
     networks:
-      - flowforge-network
+      - n8n_network
 
   backend:
     build: ./Backend
-    container_name: flowforge-backend
-    restart: always
+    container_name: n8n_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
     environment:
-      - MONGODB_URI=mongodb://admin:admin@mongodb:27017
+      - MONGODB_URL=mongodb://admin:password123@mongodb:27017/n8n_clone?authSource=admin
+      - REDIS_URL=redis://redis:6379
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - HASHNODE_API_KEY=${HASHNODE_API_KEY}
       - TWITTER_API_KEY=${TWITTER_API_KEY}
       - TWITTER_API_SECRET=${TWITTER_API_SECRET}
       - TWITTER_ACCESS_TOKEN=${TWITTER_ACCESS_TOKEN}
       - TWITTER_ACCESS_TOKEN_SECRET=${TWITTER_ACCESS_TOKEN_SECRET}
-    ports:
-      - "8000:8000"
     depends_on:
       - mongodb
-    networks:
-      - flowforge-network
+      - redis
     volumes:
       - ./Backend:/app
-    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - n8n_network
+
+  frontend:
+    build: ./frontend
+    container_name: n8n_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - n8n_network
 
 volumes:
   mongodb_data:
-    driver: local
+  redis_data:
 
 networks:
-  flowforge-network:
+  n8n_network:
     driver: bridge
