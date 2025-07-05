@@ -51,21 +51,21 @@ services:
     networks:
       - n8n_network
 
-  frontend:
-    build: ./frontend
-    container_name: n8n_frontend
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000
-    depends_on:
-      - backend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    networks:
-      - n8n_network
+  # frontend:
+  #   build: ./frontend
+  #   container_name: n8n_frontend
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - REACT_APP_API_URL=http://localhost:8000
+  #   depends_on:
+  #     - backend
+  #   volumes:
+  #     - ./frontend:/app
+  #     - /app/node_modules
+  #   networks:
+  #     - n8n_network
 
 volumes:
   mongodb_data:

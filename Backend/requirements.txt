@@ -18,6 +18,6 @@ langchain-core==0.3.68
 langchain-community==0.3.27
 langchain-mongodb==0.6.2
 langgraph-checkpoint-mongodb==0.1.4
-langfuse==2.0.0
+langfuse==3.1.2
 tweepy==4.14.0
-hashnode==0.1.0
+hashnode==0.4.dev0

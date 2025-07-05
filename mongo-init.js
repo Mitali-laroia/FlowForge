@@ -1,9 +1,10 @@
-// Create the database and user
+// Create database and user
 db = db.getSiblingDB('n8n_clone');
 
+// Create a user for the application
 db.createUser({
-  user: 'n8n_user',
-  pwd: 'n8n_password',
+  user: 'app_user',
+  pwd: 'app_password',
   roles: [
     {
       role: 'readWrite',
@@ -12,9 +13,11 @@ db.createUser({
   ]
 });
 
-// Create collections with initial indexes
-db.users.createIndex({ "username": 1 }, { unique: true });
-db.users.createIndex({ "email": 1 }, { unique: true });
-db.workflows.createIndex({ "owner_id": 1 });
-db.workflow_executions.createIndex({ "workflow_id": 1 });
-db.workflow_executions.createIndex({ "status": 1 });
+// Create collections
+db.createCollection('users');
+db.createCollection('workflows');
+db.createCollection('workflow_executions');
+db.createCollection('node_templates');
+db.createCollection('workflow_checkpoints');
+
+print('MongoDB initialized successfully');

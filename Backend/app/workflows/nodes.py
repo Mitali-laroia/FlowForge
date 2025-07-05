@@ -43,7 +43,7 @@ def generate_blog_node(state: WorkflowState) -> Dict[str, Any]:
     
     return {
         "blog_content": blog_content,
-        "current_node": "apply_theme",
+        "current_node": "apply_theme",  # This will be overridden by conditional edge
         "workflow_status": "blog_generated",
         "messages": state["messages"] + [{"role": "assistant", "content": f"Blog generated: {blog_content[:100]}..."}]
     }
@@ -51,7 +51,7 @@ def generate_blog_node(state: WorkflowState) -> Dict[str, Any]:
 def apply_theme_node(state: WorkflowState) -> Dict[str, Any]:
     """Apply theme to the blog content"""
     blog_content = state.get("blog_content", "")
-    theme = state.get("theme", "")
+    theme = state.get("theme")
     
     if not theme:
         # If no theme provided, skip this step
@@ -115,7 +115,7 @@ def twitter_thread_node(state: WorkflowState) -> Dict[str, Any]:
     }
 
 def hashnode_post_node(state: WorkflowState) -> Dict[str, Any]:
-    """Prepare Hashnode post data"""
+    """Prepare Hashnode post data and pause for human approval"""
     blog_content = state.get("themed_blog") or state.get("blog_content", "")
     topic = state.get("topic", "")
     
@@ -134,41 +134,25 @@ def hashnode_post_node(state: WorkflowState) -> Dict[str, Any]:
     
     return {
         "hashnode_post": hashnode_post,
-        "current_node": "human_approval_hashnode",
-        "workflow_status": "hashnode_ready",
-        "messages": state["messages"] + [{"role": "assistant", "content": f"Hashnode post prepared: {title}"}]
+        "current_node": "hashnode_post",  # Stay at this node
+        "workflow_status": "waiting_hashnode_approval",  # Indicate waiting
+        "messages": state["messages"] + [{"role": "assistant", "content": f"Hashnode post prepared: {title}. Waiting for approval."}]
     }
 
 def twitter_post_node(state: WorkflowState) -> Dict[str, Any]:
-    """Prepare Twitter post data"""
+    """Prepare Twitter post data and pause for human approval"""
     twitter_thread = state.get("twitter_thread", "")
     
     twitter_post = {
         "content": twitter_thread,
-        "scheduled_time": None  # Will be set by human input
+        "scheduled_time": None
     }
     
     return {
         "twitter_post": twitter_post,
-        "current_node": "human_approval_twitter",
-        "workflow_status": "twitter_ready",
-        "messages": state["messages"] + [{"role": "assistant", "content": "Twitter post prepared for approval"}]
-    }
-
-def human_approval_hashnode_node(state: WorkflowState) -> Dict[str, Any]:
-    """Wait for human approval for Hashnode publishing"""
-    return {
-        "current_node": "human_approval_hashnode",
-        "workflow_status": "waiting_hashnode_approval",
-        "messages": state["messages"] + [{"role": "system", "content": "Waiting for human approval to publish on Hashnode"}]
-    }
-
-def human_approval_twitter_node(state: WorkflowState) -> Dict[str, Any]:
-    """Wait for human approval for Twitter publishing"""
-    return {
-        "current_node": "human_approval_twitter",
-        "workflow_status": "waiting_twitter_approval",
-        "messages": state["messages"] + [{"role": "system", "content": "Waiting for human approval to publish on Twitter"}]
+        "current_node": "twitter_post",  # Stay at this node
+        "workflow_status": "waiting_twitter_approval",  # Indicate waiting
+        "messages": state["messages"] + [{"role": "assistant", "content": "Twitter post prepared. Waiting for approval."}]
     }
 
 def publish_hashnode_node(state: WorkflowState) -> Dict[str, Any]:
@@ -188,17 +172,15 @@ def publish_hashnode_node(state: WorkflowState) -> Dict[str, Any]:
     
     return {
         "hashnode_post": published_post,
-        "current_node": "publish_twitter",
+        "current_node": "twitter_post",
         "workflow_status": "hashnode_published",
         "messages": state["messages"] + [{"role": "assistant", "content": f"Published on Hashnode: {published_post['url']}"}]
     }
 
 def publish_twitter_node(state: WorkflowState) -> Dict[str, Any]:
     """Publish to Twitter"""
-    # This would integrate with Twitter API
-    # For now, we'll simulate the publishing
     twitter_post = state.get("twitter_post", {})
-
+    
     if not isinstance(twitter_post, dict):
         twitter_post = {}
     

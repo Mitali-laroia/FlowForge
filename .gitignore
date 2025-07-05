@@ -2,3 +2,10 @@
 /venv
 /Backend/.env
 /Backend/__pycache__
+/Backend/app/core/__pycache__
+/Backend/app/models/__pycache__
+/Backend/app/schemas/__pycache__
+/Backend/app/services/__pycache__
+/Backend/app/workflows/__pycache__
+/Backend/app/routers/__pycache__
+/Backend/app/__pycache__

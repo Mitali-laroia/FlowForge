@@ -3,11 +3,11 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # Database
-    MONGODB_URL: str = "mongodb://admin:password123@localhost:27017/n8n_clone?authSource=admin"
+    MONGODB_URL: str = "mongodb://admin:password123@mongodb:27017/n8n_clone?authSource=admin"
     DATABASE_NAME: str = "n8n_clone"
     
     # Redis
-    REDIS_URL: str = "redis://localhost:6379"
+    REDIS_URL: str = "redis://redis:6379"
     
     # API Keys
     OPENAI_API_KEY: str = ""
