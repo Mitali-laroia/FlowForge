@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     TWITTER_ACCESS_TOKEN: str = ""
     TWITTER_ACCESS_TOKEN_SECRET: str = ""
     
+    # Hashnode Settings
+    HASHNODE_PUBLICATION_DOMAIN: str = ""
+    HASHNODE_PUBLICATION_ID: str = ""
+    
     # Security
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"

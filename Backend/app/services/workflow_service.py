@@ -114,11 +114,16 @@ class WorkflowService:
             try:
                 state = checkpointer.get(config)
                 if state:
+                    # Extract values from the nested state structure
+                    channel_values = state.get("channel_values", {})
+                    workflow_status = channel_values.get("workflow_status", "unknown")
+                    current_node = channel_values.get("current_node", "")
+
                     return {
                         "thread_id": thread_id,
-                        "status": state.get("workflow_status", "unknown"),
-                        "current_node": state.get("current_node", ""),
-                        "requires_human_input": self._requires_human_input(state.get("current_node", "")),
+                        "status": workflow_status,
+                        "current_node": current_node,
+                        "requires_human_input": self._requires_human_input(current_node),
                         "state": state
                     }
                 else:

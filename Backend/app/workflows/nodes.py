@@ -1,18 +1,21 @@
 from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from ..core.config import settings
 from pydantic import SecretStr
-import os
-from datetime import datetime
+from ..core.config import settings
+from ..services.hashnode_service import HashnodeService
 from ..schemas.workflow_state import WorkflowState
+from datetime import datetime
 
 # Initialize the LLM
 llm = ChatOpenAI(
-    model="gpt-4o-mini",  # Using gpt-4o-mini as gpt-4.1 doesn't exist
+    model="gpt-4o-mini",
     temperature=0.7,
     api_key=SecretStr(settings.OPENAI_API_KEY)
 )
+
+# Initialize Hashnode service
+hashnode_service = HashnodeService()
 
 def start_node(state: WorkflowState) -> Dict[str, Any]:
     """Start node - initializes the workflow with user_id"""
@@ -156,26 +159,104 @@ def twitter_post_node(state: WorkflowState) -> Dict[str, Any]:
     }
 
 def publish_hashnode_node(state: WorkflowState) -> Dict[str, Any]:
-    """Publish to Hashnode"""
+    """Publish to Hashnode using real API"""
     hashnode_post = state.get("hashnode_post", {})
     
-    # Ensure hashnode_post is a dictionary
     if not isinstance(hashnode_post, dict):
-        hashnode_post = {}
+        raise ValueError("Hashnode post data is invalid")
     
-    # Simulate API call
-    published_post = {
-        **hashnode_post,
-        "published_at": datetime.now().isoformat(),
-        "url": f"https://your-subdomain.hashnode.dev/{hashnode_post.get('title', 'blog').lower().replace(' ', '-')}"
-    }
-    
-    return {
-        "hashnode_post": published_post,
-        "current_node": "twitter_post",
-        "workflow_status": "hashnode_published",
-        "messages": state["messages"] + [{"role": "assistant", "content": f"Published on Hashnode: {published_post['url']}"}]
-    }
+    try:
+        # Extract post data
+        title = hashnode_post.get("title", "Untitled Post")
+        content = hashnode_post.get("content", "")
+        tags = hashnode_post.get("tags", ["blog"])
+        
+        # Ensure content is not empty
+        if not content:
+            raise ValueError("Blog content is empty")
+        
+        # Create tags list (ensure they're strings and not too long)
+        processed_tags = []
+        for tag in tags:
+            if isinstance(tag, str) and len(tag) <= 20:
+                processed_tags.append(tag)
+        
+        # Add default tag if none provided
+        if not processed_tags:
+            processed_tags = ["blog"]
+        
+        # First create a draft
+        print(f"Creating draft for title: {title}")
+        draft_result = hashnode_service.create_post(
+            title=title,
+            content=content,
+            tags=processed_tags
+        )
+
+        print(f"Draft creation result: {draft_result}")
+
+        if not draft_result.get("success"):
+            raise Exception(f"Failed to create draft: {draft_result.get('message', 'Unknown error')}")
+
+        draft_id = draft_result.get("draft_id")
+        print(f"Draft ID received: {draft_id}")
+
+        if not draft_id:
+            raise Exception("Draft ID not returned from Hashnode")
+
+        # Then publish the draft
+        print(f"Publishing draft with ID: {draft_id}")
+        publish_result = hashnode_service.publish_draft(draft_id)
+        print(f"Publish result: {publish_result}")
+        
+        if not publish_result.get("success"):
+            raise Exception(f"Failed to publish draft: {publish_result.get('message', 'Unknown error')}")
+        
+        # Update the hashnode_post with real data
+        published_post = {
+            **hashnode_post,
+            "published_at": datetime.now().isoformat(),
+            "hashnode_id": publish_result.get("post", {}).get("id"),
+            "url": publish_result.get("post", {}).get("url"),
+            "slug": publish_result.get("post", {}).get("slug"),
+            "success": publish_result.get("success", False),
+            "message": publish_result.get("message", "Post published successfully"),
+            "draft_id": draft_id
+        }
+        
+        return {
+            "hashnode_post": published_post,
+            "current_node": "twitter_post",
+            "workflow_status": "hashnode_published",
+            "messages": state["messages"] + [
+                {
+                    "role": "assistant", 
+                    "content": f"Published on Hashnode: {published_post.get('url', 'URL not available')}"
+                }
+            ]
+        }
+        
+    except Exception as e:
+        # Log the error and return error state
+        error_message = f"Failed to publish on Hashnode: {str(e)}"
+        print(error_message)
+        
+        return {
+            "hashnode_post": {
+                **hashnode_post,
+                "error": error_message,
+                "published_at": datetime.now().isoformat(),
+                "success": False
+            },
+            "current_node": "twitter_post",  # Continue to next step even if failed
+            "workflow_status": "hashnode_failed",
+            "messages": state["messages"] + [
+                {
+                    "role": "system", 
+                    "content": error_message
+                }
+            ]
+        }
 
 def publish_twitter_node(state: WorkflowState) -> Dict[str, Any]:
     """Publish to Twitter"""
