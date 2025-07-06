@@ -35,7 +35,9 @@ class WorkflowService:
                 },
                 workflow_status="initialized",
                 current_node="start",
-                human_input=None
+                human_input=None,
+                hashnode_approval=None,
+                twitter_approval=None
             )
             
             # Configure the workflow
@@ -62,7 +64,7 @@ class WorkflowService:
         """Provide human input to continue workflow"""
         with MongoDBSaver.from_conn_string(self.mongo_uri) as checkpointer:
             workflow = compile_workflow_with_checkpointer(checkpointer)
-            
+
             # Get current state
             config: RunnableConfig = {
                 "configurable": {
@@ -70,23 +72,21 @@ class WorkflowService:
                 },
                 "recursion_limit": 50
             }
-            
-            # Update state with human input
-            update_state = WorkflowState(
-                messages=[],
-                user_id="",
-                topic="",
-                theme=None,
-                blog_content=None,
-                themed_blog=None,
-                twitter_thread=None,
-                hashnode_post=None,
-                twitter_post=None,
-                publish_schedule={},
-                workflow_status="",
-                current_node="",
-                human_input=request.user_input
-            )
+
+            # Get current state to determine which approval to set
+            current_state = checkpointer.get(config)
+            current_node = ""
+            if current_state:
+                channel_values = current_state.get("channel_values", {})
+                current_node = channel_values.get("current_node", "")
+
+            # Determine which approval field to set based on current node
+            if current_node == "hashnode_post":
+                update_state = {"hashnode_approval": request.user_input, "human_input": request.user_input}
+            elif current_node == "twitter_post":
+                update_state = {"twitter_approval": request.user_input, "human_input": request.user_input}
+            else:
+                update_state = {"human_input": request.user_input}
             
             # Continue workflow
             result = workflow.invoke(update_state, config)
@@ -141,4 +141,4 @@ class WorkflowService:
     
     def _requires_human_input(self, current_node: str) -> bool:
         """Check if current node requires human input"""
-        return current_node in ["hashnode_post", "twitter_post"] 
+        return current_node in ["hashnode_post", "twitter_post"]

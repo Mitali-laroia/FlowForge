@@ -9,3 +9,4 @@
 /Backend/app/workflows/__pycache__
 /Backend/app/routers/__pycache__
 /Backend/app/__pycache__
+test_*

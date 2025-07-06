@@ -18,6 +18,8 @@ class WorkflowState(TypedDict):
     workflow_status: str
     current_node: str
     human_input: Optional[str]
+    hashnode_approval: Optional[str]
+    twitter_approval: Optional[str]
 
 class WorkflowRequest(BaseModel):
     user_id: str

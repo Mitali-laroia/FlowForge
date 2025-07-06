@@ -259,22 +259,72 @@ def publish_hashnode_node(state: WorkflowState) -> Dict[str, Any]:
         }
 
 def publish_twitter_node(state: WorkflowState) -> Dict[str, Any]:
-    """Publish to Twitter"""
+    """Publish to Twitter using real API"""
+    from ..services.twitter_service import TwitterService
+
     twitter_post = state.get("twitter_post", {})
-    
+
     if not isinstance(twitter_post, dict):
-        twitter_post = {}
-    
-    # Simulate API call
-    published_tweet = {
-        **twitter_post,
-        "published_at": datetime.now().isoformat(),
-        "tweet_id": "1234567890"
-    }
-    
-    return {
-        "twitter_post": published_tweet,
-        "current_node": "end",
-        "workflow_status": "completed",
-        "messages": state["messages"] + [{"role": "assistant", "content": "Published on Twitter successfully"}]
-    } 
+        raise ValueError("Twitter post data is invalid")
+
+    try:
+        # Initialize Twitter service
+        twitter_service = TwitterService()
+
+        # Get the thread content
+        thread_content = twitter_post.get("content", "")
+        if not thread_content:
+            raise ValueError("No content found for Twitter post")
+
+        print(f"Publishing Twitter thread...")
+        print(f"Thread content: {thread_content[:200]}...")
+
+        # Post the thread
+        publish_result = twitter_service.post_thread(thread_content)
+
+        if not publish_result.get("success"):
+            raise Exception(f"Failed to publish Twitter thread: {publish_result.get('message', 'Unknown error')}")
+
+        # Update the twitter_post with real data
+        published_post = {
+            **twitter_post,
+            "published_at": datetime.now().isoformat(),
+            "tweets": publish_result.get("tweets", []),
+            "thread_url": publish_result.get("thread_url"),
+            "success": publish_result.get("success", False),
+            "message": publish_result.get("message", "Thread published successfully")
+        }
+
+        return {
+            "twitter_post": published_post,
+            "current_node": "end",
+            "workflow_status": "completed",
+            "messages": state["messages"] + [
+                {
+                    "role": "assistant",
+                    "content": f"Published Twitter thread: {published_post.get('thread_url', 'URL not available')}"
+                }
+            ]
+        }
+
+    except Exception as e:
+        # Log the error and return error state
+        error_message = f"Failed to publish on Twitter: {str(e)}"
+        print(error_message)
+
+        return {
+            "twitter_post": {
+                **twitter_post,
+                "error": error_message,
+                "published_at": datetime.now().isoformat(),
+                "success": False
+            },
+            "current_node": "end",  # End workflow even if failed
+            "workflow_status": "twitter_failed",
+            "messages": state["messages"] + [
+                {
+                    "role": "system",
+                    "content": error_message
+                }
+            ]
+        }

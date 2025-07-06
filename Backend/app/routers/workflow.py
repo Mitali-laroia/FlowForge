@@ -59,4 +59,72 @@ async def get_workflow_state(
             raise HTTPException(status_code=404, detail="Workflow not found")
         return result.get("state", {})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{thread_id}/approve/hashnode", response_model=WorkflowResponse)
+async def approve_hashnode_publishing(
+    thread_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service)
+):
+    """Approve Hashnode publishing"""
+    try:
+        request = HumanInputRequest(
+            thread_id=thread_id,
+            user_input="yes",
+            action="approve"
+        )
+        result = await workflow_service.provide_human_input(request)
+        return WorkflowResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{thread_id}/reject/hashnode", response_model=WorkflowResponse)
+async def reject_hashnode_publishing(
+    thread_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service)
+):
+    """Reject Hashnode publishing"""
+    try:
+        request = HumanInputRequest(
+            thread_id=thread_id,
+            user_input="no",
+            action="reject"
+        )
+        result = await workflow_service.provide_human_input(request)
+        return WorkflowResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{thread_id}/approve/twitter", response_model=WorkflowResponse)
+async def approve_twitter_publishing(
+    thread_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service)
+):
+    """Approve Twitter publishing"""
+    try:
+        request = HumanInputRequest(
+            thread_id=thread_id,
+            user_input="yes",
+            action="approve"
+        )
+        result = await workflow_service.provide_human_input(request)
+        return WorkflowResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{thread_id}/reject/twitter", response_model=WorkflowResponse)
+async def reject_twitter_publishing(
+    thread_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service)
+):
+    """Reject Twitter publishing"""
+    try:
+        request = HumanInputRequest(
+            thread_id=thread_id,
+            user_input="no",
+            action="reject"
+        )
+        result = await workflow_service.provide_human_input(request)
+        return WorkflowResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

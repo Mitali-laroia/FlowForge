@@ -29,35 +29,35 @@ def create_workflow_graph():
     
     def should_publish_hashnode(state: Dict[str, Any]) -> str:
         """Decide whether to publish on Hashnode based on human input"""
-        human_input = state.get("human_input")
-        
-        if human_input is None:
+        hashnode_approval = state.get("hashnode_approval")
+
+        if hashnode_approval is None:
             # PAUSE the workflow here - don't route anywhere
-            return "end"  # End the workflow until human input is provided
-        
-        human_input = str(human_input).lower()
-        if human_input in ["yes", "approve"]:
+            return END  # End the workflow until human input is provided
+
+        hashnode_approval = str(hashnode_approval).lower()
+        if hashnode_approval in ["yes", "approve"]:
             return "publish_hashnode"
-        elif human_input in ["no", "reject"]:
+        elif hashnode_approval in ["no", "reject"]:
             return "twitter_post"
         else:
-            return "end"  # End the workflow for invalid input
+            return END  # End the workflow for invalid input
     
     def should_publish_twitter(state: Dict[str, Any]) -> str:
         """Decide whether to publish on Twitter based on human input"""
-        human_input = state.get("human_input")
-        
-        if human_input is None:
+        twitter_approval = state.get("twitter_approval")
+
+        if twitter_approval is None:
             # PAUSE the workflow here - don't route anywhere
-            return "end"  # End the workflow until human input is provided
-        
-        human_input = str(human_input).lower()
-        if human_input in ["yes", "approve"]:
+            return END  # End the workflow until human input is provided
+
+        twitter_approval = str(twitter_approval).lower()
+        if twitter_approval in ["yes", "approve"]:
             return "publish_twitter"
-        elif human_input in ["no", "reject"]:
-            return "end"
+        elif twitter_approval in ["no", "reject"]:
+            return END
         else:
-            return "end"  # End the workflow for invalid input
+            return END  # End the workflow for invalid input
     
     # Add edges - LINEAR FLOW with pauses
     workflow.add_edge(START, "start")
